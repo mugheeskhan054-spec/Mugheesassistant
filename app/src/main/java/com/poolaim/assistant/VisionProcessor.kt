@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import org.opencv.android.Utils
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
-import kotlin.math.hypot
 
 class VisionProcessor(
     private val tableTopLeft: Vec2,
@@ -25,16 +24,37 @@ class VisionProcessor(
         Imgproc.cvtColor(tableMat, hsv, Imgproc.COLOR_RGBA2RGB)
         Imgproc.cvtColor(hsv, hsv, Imgproc.COLOR_RGB2HSV)
 
-        // Mask specifically tuned for the Cyan/Blue 8 Ball Pool felt:
-        // Hue: 85 to 130 covers blue/cyan cloth across brightness gradients
-        val feltMask = Mat()
-        Core.inRange(hsv, Scalar(85.0, 70.0, 50.0), Scalar(135.0, 255.0, 255.0), feltMask)
+        // 1. AUTO-SAMPLE TABLE CLOTH COLOR
+        // Sample a 20x20 patch near the center of the table felt
+        val sampleX = (roiWidth * 0.45f).toInt().coerceIn(0, roiWidth - 25)
+        val sampleY = (roiHeight * 0.45f).toInt().coerceIn(0, roiHeight - 25)
+        val sampleRoi = Mat(hsv, Rect(sampleX, sampleY, 20, 20))
+        val meanColor = Core.mean(sampleRoi)
+        sampleRoi.release()
 
-        // Invert: Non-felt elements (balls) become white
+        val feltH = meanColor.`val`[0]
+        val feltS = meanColor.`val`[1]
+        val feltV = meanColor.`val`[2]
+
+        // 2. DYNAMIC TOLERANCE MASK BASED ON SAMPLED COLOR
+        val lowerBound = Scalar(
+            (feltH - 18.0).coerceAtLeast(0.0),
+            (feltS - 50.0).coerceAtLeast(30.0),
+            (feltV - 60.0).coerceAtLeast(30.0)
+        )
+        val upperBound = Scalar(
+            (feltH + 18.0).coerceAtMost(180.0),
+            (feltS + 50.0).coerceAtMost(255.0),
+            (feltV + 60.0).coerceAtMost(255.0)
+        )
+
+        val feltMask = Mat()
+        Core.inRange(hsv, lowerBound, upperBound, feltMask)
+
+        // Invert: non-cloth objects (balls, chalk, pocket outlines) become white
         val nonFelt = Mat()
         Core.bitwise_not(feltMask, nonFelt)
 
-        // Morphological opening to eliminate line artifacts and table chalk marks
         val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
         Imgproc.morphologyEx(nonFelt, nonFelt, Imgproc.MORPH_OPEN, kernel)
 
@@ -46,10 +66,8 @@ class VisionProcessor(
         var cueBall: Ball? = null
 
         val expectedArea = Math.PI * ballRadiusPixels * ballRadiusPixels
-        val minArea = expectedArea * 0.4
-        val maxArea = expectedArea * 1.8
-
-        // Define pocket deadzones inside the ROI to ignore pocket shadows
+        val minArea = expectedArea * 0.35
+        val maxArea = expectedArea * 2.0
         val pocketRadiusTolerance = ballRadiusPixels * 2.2f
 
         for (contour in contours) {
@@ -60,7 +78,7 @@ class VisionProcessor(
                     val localX = (moments.m10 / moments.m00).toFloat()
                     val localY = (moments.m01 / moments.m00).toFloat()
 
-                    // Ignore detections directly hugging the inner cushion boundary / pocket corners
+                    // Exclude pocket zones
                     val isNearCorner = (localX < pocketRadiusTolerance || localX > roiWidth - pocketRadiusTolerance) &&
                             (localY < pocketRadiusTolerance || localY > roiHeight - pocketRadiusTolerance)
                     val isNearSidePocket = (Math.abs(localX - (roiWidth / 2f)) < pocketRadiusTolerance) &&
@@ -78,8 +96,8 @@ class VisionProcessor(
                     val pY = localY.toInt().coerceIn(0, tableMat.rows() - 1)
                     val pixel = hsv.get(pY, pX)
 
-                    // Cue ball has minimal color saturation and high brightness
-                    val isWhite = (pixel != null && pixel[1] < 40.0 && pixel[2] > 195.0)
+                    // White cue ball detection remains universal (always white regardless of table color)
+                    val isWhite = (pixel != null && pixel[1] < 45.0 && pixel[2] > 190.0)
                     val detectedBall = Ball(Vec2(screenX, screenY), ballRadiusPixels, isWhite)
 
                     if (isWhite) {
