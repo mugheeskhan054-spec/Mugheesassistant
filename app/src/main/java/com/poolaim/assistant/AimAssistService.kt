@@ -16,6 +16,8 @@ import android.os.Looper
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import org.opencv.android.OpenCVLoader
+import kotlin.math.cos
+import kotlin.math.sin
 
 class AimAssistService : Service() {
 
@@ -35,7 +37,6 @@ class AimAssistService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        
         OpenCVLoader.initDebug()
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -66,24 +67,15 @@ class AimAssistService : Service() {
         val height = metrics.heightPixels
         val dpi = metrics.densityDpi
 
-        val tableTL = Vec2(width * 0.08f, height * 0.15f)
-        val tableBR = Vec2(width * 0.92f, height * 0.85f)
+        // In 8 Ball Pool (Landscape), table is bounded within 5% - 95% width, 12% - 88% height
+        val tableTL = Vec2(width * 0.05f, height * 0.12f)
+        val tableBR = Vec2(width * 0.95f, height * 0.88f)
 
-        val dynamicBallRadius = height * 0.028f
+        val dynamicBallRadius = height * 0.026f
         overlayView.targetRadius = dynamicBallRadius
 
         physicsEngine = PhysicsEngine(ballRadius = dynamicBallRadius)
         visionProcessor = VisionProcessor(tableTL, tableBR, dynamicBallRadius)
-
-        overlayView.activeTrajectory = ShotTrajectory(
-            cueBallStart = Vec2(width * 0.35f, height * 0.5f),
-            cueBallImpact = Vec2(width * 0.65f, height * 0.5f),
-            objectBallPath = Vec2(1f, -0.4f).normalize(),
-            cueBallDeflection = Vec2(0.4f, 1f).normalize(),
-            cushionBounce = Vec2(width * 0.92f, height * 0.38f)
-        )
-        overlayView.statusText = "Vision Engine Active - Waiting for Game Table..."
-        overlayView.invalidate()
 
         val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, data)
@@ -98,8 +90,7 @@ class AimAssistService : Service() {
 
         imageReader?.setOnImageAvailableListener({ reader ->
             if (isProcessing) {
-                val img = reader.acquireLatestImage()
-                img?.close()
+                reader.acquireLatestImage()?.close()
                 return@setOnImageAvailableListener
             }
 
@@ -120,24 +111,31 @@ class AimAssistService : Service() {
                 val (balls, cueBall) = visionProcessor.processFrame(bitmap)
 
                 mainHandler.post {
-                    if (balls.isNotEmpty()) {
-                        overlayView.statusText = "Detected ${balls.size} Balls"
-                        
-                        val activeCue = cueBall ?: balls.first()
-                        val target = balls.firstOrNull { it != activeCue }
+                    overlayView.detectedBalls = balls
 
-                        if (target != null) {
-                            val aimDir = (target.pos - activeCue.pos).normalize()
-                            val trajectory = physicsEngine.computeShot(
-                                activeCue.pos,
-                                aimDir,
-                                balls,
-                                Pair(tableTL, tableBR)
-                            )
-                            overlayView.activeTrajectory = trajectory
+                    if (balls.isNotEmpty()) {
+                        overlayView.statusText = "Locked: ${balls.size} Balls Detected"
+
+                        // Default cue ball to the detected white ball, or lowest ball on table
+                        val activeCue = cueBall ?: balls.minByOrNull { it.pos.y } ?: balls.first()
+                        val candidates = balls.filter { it != activeCue }
+
+                        if (candidates.isNotEmpty()) {
+                            // Find candidate ball closest to cue path heading
+                            val target = candidates.minByOrNull { (it.pos - activeCue.pos).length() }
+                            if (target != null) {
+                                val aimDir = (target.pos - activeCue.pos).normalize()
+                                val trajectory = physicsEngine.computeShot(
+                                    activeCue.pos,
+                                    aimDir,
+                                    balls,
+                                    Pair(tableTL, tableBR)
+                                )
+                                overlayView.activeTrajectory = trajectory
+                            }
                         }
                     } else {
-                        overlayView.statusText = "Searching for Table Balls..."
+                        overlayView.statusText = "Searching table area... Open 8 Ball Pool match"
                     }
                     overlayView.invalidate()
                     isProcessing = false
