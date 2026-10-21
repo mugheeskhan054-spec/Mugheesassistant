@@ -7,34 +7,39 @@ import org.opencv.imgproc.Imgproc
 
 class VisionProcessor(
     private val tableTopLeft: Vec2,
-    private val tableBottomRight: Vec2
+    private val tableBottomRight: Vec2,
+    private val ballRadiusPixels: Float
 ) {
-    private val ballRadiusPixels = 18f
-
     fun processFrame(bitmap: Bitmap): Pair<List<Ball>, Ball?> {
         val mat = Mat()
         Utils.bitmapToMat(bitmap, mat)
 
-        val roiWidth = (tableBottomRight.x - tableTopLeft.x).toInt().coerceAtLeast(1)
-        val roiHeight = (tableBottomRight.y - tableTopLeft.y).toInt().coerceAtLeast(1)
-        val roi = Rect(tableTopLeft.x.toInt(), tableTopLeft.y.toInt(), roiWidth, roiHeight)
+        val roiWidth = (tableBottomRight.x - tableTopLeft.x).toInt().coerceIn(1, mat.cols())
+        val roiHeight = (tableBottomRight.y - tableTopLeft.y).toInt().coerceIn(1, mat.rows())
+        val roiX = tableTopLeft.x.toInt().coerceIn(0, mat.cols() - roiWidth)
+        val roiY = tableTopLeft.y.toInt().coerceIn(0, mat.rows() - roiHeight)
 
+        val roi = Rect(roiX, roiY, roiWidth, roiHeight)
         val tableMat = Mat(mat, roi)
+
         val gray = Mat()
         Imgproc.cvtColor(tableMat, gray, Imgproc.COLOR_RGBA2GRAY)
         Imgproc.GaussianBlur(gray, gray, Size(9.0, 9.0), 2.0)
 
         val circles = Mat()
+        val minR = (ballRadiusPixels * 0.7f).toInt().coerceAtLeast(8)
+        val maxR = (ballRadiusPixels * 1.3f).toInt().coerceAtLeast(minR + 5)
+
         Imgproc.HoughCircles(
             gray,
             circles,
             Imgproc.HOUGH_GRADIENT,
             1.2,
-            ballRadiusPixels.toDouble() * 1.8,
-            50.0,
-            24.0,
-            (ballRadiusPixels * 0.8).toInt(),
-            (ballRadiusPixels * 1.2).toInt()
+            ballRadiusPixels.toDouble() * 1.5,
+            45.0,
+            20.0,
+            minR,
+            maxR
         )
 
         val balls = mutableListOf<Ball>()
@@ -50,14 +55,15 @@ class VisionProcessor(
             val localY = data[1].toFloat()
             val r = data[2].toFloat()
 
-            val screenX = localX + tableTopLeft.x
-            val screenY = localY + tableTopLeft.y
+            val screenX = localX + roiX
+            val screenY = localY + roiY
 
             val pX = localX.toInt().coerceIn(0, tableMat.cols() - 1)
             val pY = localY.toInt().coerceIn(0, tableMat.rows() - 1)
             val pixel = hsv.get(pY, pX)
 
-            val isWhite = (pixel != null && pixel[1] < 45.0 && pixel[2] > 200.0)
+            val isWhite = (pixel != null && pixel[1] < 45.0 && pixel[2] > 190.0)
+
             val detected = Ball(Vec2(screenX, screenY), r, isWhite)
             if (isWhite) {
                 cueBall = detected
