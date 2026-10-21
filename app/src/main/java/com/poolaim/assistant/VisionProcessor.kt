@@ -19,63 +19,70 @@ class VisionProcessor(
         val roiX = tableTopLeft.x.toInt().coerceIn(0, mat.cols() - roiWidth)
         val roiY = tableTopLeft.y.toInt().coerceIn(0, mat.rows() - roiHeight)
 
-        val roi = Rect(roiX, roiY, roiWidth, roiHeight)
-        val tableMat = Mat(mat, roi)
-
-        val gray = Mat()
-        Imgproc.cvtColor(tableMat, gray, Imgproc.COLOR_RGBA2GRAY)
-        Imgproc.GaussianBlur(gray, gray, Size(9.0, 9.0), 2.0)
-
-        val circles = Mat()
-        val minR = (ballRadiusPixels * 0.7f).toInt().coerceAtLeast(8)
-        val maxR = (ballRadiusPixels * 1.3f).toInt().coerceAtLeast(minR + 5)
-
-        Imgproc.HoughCircles(
-            gray,
-            circles,
-            Imgproc.HOUGH_GRADIENT,
-            1.2,
-            ballRadiusPixels.toDouble() * 1.5,
-            45.0,
-            20.0,
-            minR,
-            maxR
-        )
-
-        val balls = mutableListOf<Ball>()
-        var cueBall: Ball? = null
-
+        val tableMat = Mat(mat, Rect(roiX, roiY, roiWidth, roiHeight))
         val hsv = Mat()
         Imgproc.cvtColor(tableMat, hsv, Imgproc.COLOR_RGBA2RGB)
         Imgproc.cvtColor(hsv, hsv, Imgproc.COLOR_RGB2HSV)
 
-        for (i in 0 until circles.cols()) {
-            val data = circles.get(0, i) ?: continue
-            val localX = data[0].toFloat()
-            val localY = data[1].toFloat()
-            val r = data[2].toFloat()
+        // Mask the table felt (common green/blue pool table ranges)
+        // Hue: 35-90 (Green) & 90-130 (Blue tables), Saturation: 60-255, Value: 40-255
+        val feltMask = Mat()
+        Core.inRange(hsv, Scalar(35.0, 50.0, 40.0), Scalar(135.0, 255.0, 255.0), feltMask)
 
-            val screenX = localX + roiX
-            val screenY = localY + roiY
+        // Invert mask: balls, cushions, and pockets become foreground (white)
+        val nonFelt = Mat()
+        Core.bitwise_not(feltMask, nonFelt)
 
-            val pX = localX.toInt().coerceIn(0, tableMat.cols() - 1)
-            val pY = localY.toInt().coerceIn(0, tableMat.rows() - 1)
-            val pixel = hsv.get(pY, pX)
+        // Remove cushion edges by eroding boundaries slightly
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+        Imgproc.morphologyEx(nonFelt, nonFelt, Imgproc.MORPH_OPEN, kernel)
 
-            val isWhite = (pixel != null && pixel[1] < 45.0 && pixel[2] > 190.0)
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        Imgproc.findContours(nonFelt, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
-            val detected = Ball(Vec2(screenX, screenY), r, isWhite)
-            if (isWhite) {
-                cueBall = detected
+        val balls = mutableListOf<Ball>()
+        var cueBall: Ball? = null
+
+        val expectedArea = Math.PI * ballRadiusPixels * ballRadiusPixels
+        val minArea = expectedArea * 0.35
+        val maxArea = expectedArea * 2.2
+
+        for (contour in contours) {
+            val area = Imgproc.contourArea(contour)
+            if (area in minArea..maxArea) {
+                val moments = Imgproc.moments(contour)
+                if (moments.m00 != 0.0) {
+                    val localX = (moments.m10 / moments.m00).toFloat()
+                    val localY = (moments.m01 / moments.m00).toFloat()
+
+                    val screenX = localX + roiX
+                    val screenY = localY + roiY
+
+                    // Inspect color at the center of the contour to find the white cue ball
+                    val pX = localX.toInt().coerceIn(0, tableMat.cols() - 1)
+                    val pY = localY.toInt().coerceIn(0, tableMat.rows() - 1)
+                    val pixel = hsv.get(pY, pX)
+
+                    val isWhite = (pixel != null && pixel[1] < 50.0 && pixel[2] > 180.0)
+                    val detectedBall = Ball(Vec2(screenX, screenY), ballRadiusPixels, isWhite)
+
+                    if (isWhite) {
+                        cueBall = detectedBall
+                    }
+                    balls.add(detectedBall)
+                }
             }
-            balls.add(detected)
+            contour.release()
         }
 
         mat.release()
         tableMat.release()
-        gray.release()
-        circles.release()
         hsv.release()
+        feltMask.release()
+        nonFelt.release()
+        hierarchy.release()
+        kernel.release()
 
         return Pair(balls, cueBall)
     }
