@@ -4,6 +4,9 @@ import android.content.Context
 import android.graphics.*
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 class OverlayAimView(context: Context) : View(context) {
 
@@ -11,7 +14,7 @@ class OverlayAimView(context: Context) : View(context) {
         color = Color.WHITE
         strokeWidth = 6f
         style = Paint.Style.STROKE
-        pathEffect = DashPathEffect(floatArrayOf(20f, 10f), 0f)
+        pathEffect = DashPathEffect(floatArrayOf(18f, 12f), 0f)
     }
 
     private val targetRedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -39,8 +42,14 @@ class OverlayAimView(context: Context) : View(context) {
     }
 
     private val ballIndicatorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(120, 34, 197, 94)
+        color = Color.argb(130, 34, 197, 94)
         style = Paint.Style.FILL
+    }
+
+    private val dialPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(160, 56, 189, 248)
+        strokeWidth = 5f
+        style = Paint.Style.STROKE
     }
 
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -54,25 +63,52 @@ class OverlayAimView(context: Context) : View(context) {
     var activeTrajectory: ShotTrajectory? = null
     var detectedBalls: List<Ball> = emptyList()
     var targetRadius: Float = 24f
-    var statusText: String = "Initializing Engine..."
+    var statusText: String = "Initializing..."
 
-    // Manual override vector (allows fine-tuning aim manually)
-    var manualAimAngle: Float = 0f
+    var currentCuePos: Vec2? = null
+    var aimAngle: Float = 0f
+
+    // Callback to trigger recalculation when touch angle changes
+    var onAimAdjusted: ((Float) -> Unit)? = null
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val cue = currentCuePos ?: return false
+
+        when (event.action) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                val dx = event.x - cue.x
+                val dy = event.y - cue.y
+                aimAngle = atan2(dy.toDouble(), dx.toDouble()).toFloat()
+                onAimAdjusted?.invoke(aimAngle)
+                invalidate()
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        // Status Header
+        // Status Banner
         canvas.drawText("🎱 $statusText", 60f, 90f, textPaint)
 
-        // Draw green rings around all computer-vision-detected balls to confirm tracking
+        // Highlight detected ball locations
         for (b in detectedBalls) {
             canvas.drawCircle(b.pos.x, b.pos.y, b.radius, ballIndicatorPaint)
         }
 
+        // Draw Interactive Aim Dial around cue ball
+        currentCuePos?.let { cue ->
+            canvas.drawCircle(cue.x, cue.y, targetRadius * 2.8f, dialPaint)
+            val handleX = cue.x + cos(aimAngle) * targetRadius * 2.8f
+            val handleY = cue.y + sin(aimAngle) * targetRadius * 2.8f
+            canvas.drawCircle(handleX, handleY, 14f, circlePaint)
+        }
+
         val traj = activeTrajectory ?: return
 
-        // 1. Cue Ball to Impact Line
+        // 1. Cue to Impact Line
         canvas.drawLine(
             traj.cueBallStart.x, traj.cueBallStart.y,
             traj.cueBallImpact.x, traj.cueBallImpact.y,
@@ -82,7 +118,7 @@ class OverlayAimView(context: Context) : View(context) {
         // 2. Ghost Impact Ring
         canvas.drawCircle(traj.cueBallImpact.x, traj.cueBallImpact.y, targetRadius, circlePaint)
 
-        // 3. Object Ball Target Line
+        // 3. Object Ball Target Line (Red)
         val objEnd = traj.cueBallImpact + (traj.objectBallPath * 500f)
         canvas.drawLine(
             traj.cueBallImpact.x, traj.cueBallImpact.y,
@@ -90,7 +126,7 @@ class OverlayAimView(context: Context) : View(context) {
             targetRedPaint
         )
 
-        // 4. Cue Ball Tangent Deflection Line
+        // 4. Cue Ball Deflection Line (Cyan)
         val cueDeflectEnd = traj.cueBallImpact + (traj.cueBallDeflection * 250f)
         canvas.drawLine(
             traj.cueBallImpact.x, traj.cueBallImpact.y,
@@ -98,7 +134,7 @@ class OverlayAimView(context: Context) : View(context) {
             cueCyanPaint
         )
 
-        // 5. Cushion Rebound Bank
+        // 5. Cushion Rebound Bank (Yellow)
         traj.cushionBounce?.let { bounce ->
             canvas.drawLine(objEnd.x, objEnd.y, bounce.x, bounce.y, bounceYellowPaint)
         }
