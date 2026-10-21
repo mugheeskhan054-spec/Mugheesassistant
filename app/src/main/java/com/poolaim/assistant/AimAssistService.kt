@@ -16,8 +16,6 @@ import android.os.Looper
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import org.opencv.android.OpenCVLoader
-import kotlin.math.cos
-import kotlin.math.sin
 
 class AimAssistService : Service() {
 
@@ -67,11 +65,14 @@ class AimAssistService : Service() {
         val height = metrics.heightPixels
         val dpi = metrics.densityDpi
 
-        // In 8 Ball Pool (Landscape), table is bounded within 5% - 95% width, 12% - 88% height
-        val tableTL = Vec2(width * 0.05f, height * 0.12f)
-        val tableBR = Vec2(width * 0.95f, height * 0.88f)
+        // Calibrated inner felt dimensions derived from 8 Ball Pool layout:
+        // Left: past cue slider (17.5%), Right: before chute (82.5%)
+        // Top: below scoreboard (17%), Bottom: above cushion (83%)
+        val tableTL = Vec2(width * 0.175f, height * 0.170f)
+        val tableBR = Vec2(width * 0.825f, height * 0.830f)
 
-        val dynamicBallRadius = height * 0.026f
+        // Measured ball radius proportional to standard playing felt height
+        val dynamicBallRadius = height * 0.024f
         overlayView.targetRadius = dynamicBallRadius
 
         physicsEngine = PhysicsEngine(ballRadius = dynamicBallRadius)
@@ -116,12 +117,10 @@ class AimAssistService : Service() {
                     if (balls.isNotEmpty()) {
                         overlayView.statusText = "Locked: ${balls.size} Balls Detected"
 
-                        // Default cue ball to the detected white ball, or lowest ball on table
                         val activeCue = cueBall ?: balls.minByOrNull { it.pos.y } ?: balls.first()
                         val candidates = balls.filter { it != activeCue }
 
                         if (candidates.isNotEmpty()) {
-                            // Find candidate ball closest to cue path heading
                             val target = candidates.minByOrNull { (it.pos - activeCue.pos).length() }
                             if (target != null) {
                                 val aimDir = (target.pos - activeCue.pos).normalize()
