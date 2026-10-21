@@ -10,9 +10,12 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import org.opencv.android.OpenCVLoader
 
 class AimAssistService : Service() {
 
@@ -25,10 +28,16 @@ class AimAssistService : Service() {
     private lateinit var physicsEngine: PhysicsEngine
     private lateinit var visionProcessor: VisionProcessor
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isProcessing = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        
+        OpenCVLoader.initDebug()
+
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         overlayView = OverlayAimView(this)
 
@@ -38,7 +47,8 @@ class AimAssistService : Service() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
         windowManager.addView(overlayView, params)
@@ -51,15 +61,29 @@ class AimAssistService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: return START_NOT_STICKY
         val data = intent.getParcelableExtra<Intent>("DATA") ?: return START_NOT_STICKY
 
-        val width = resources.displayMetrics.widthPixels
-        val height = resources.displayMetrics.heightPixels
-        val dpi = resources.displayMetrics.densityDpi
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val dpi = metrics.densityDpi
 
-        val tableTL = Vec2(width * 0.12f, height * 0.22f)
-        val tableBR = Vec2(width * 0.88f, height * 0.78f)
+        val tableTL = Vec2(width * 0.08f, height * 0.15f)
+        val tableBR = Vec2(width * 0.92f, height * 0.85f)
 
-        physicsEngine = PhysicsEngine(ballRadius = 18f)
-        visionProcessor = VisionProcessor(tableTL, tableBR)
+        val dynamicBallRadius = height * 0.028f
+        overlayView.targetRadius = dynamicBallRadius
+
+        physicsEngine = PhysicsEngine(ballRadius = dynamicBallRadius)
+        visionProcessor = VisionProcessor(tableTL, tableBR, dynamicBallRadius)
+
+        overlayView.activeTrajectory = ShotTrajectory(
+            cueBallStart = Vec2(width * 0.35f, height * 0.5f),
+            cueBallImpact = Vec2(width * 0.65f, height * 0.5f),
+            objectBallPath = Vec2(1f, -0.4f).normalize(),
+            cueBallDeflection = Vec2(0.4f, 1f).normalize(),
+            cushionBounce = Vec2(width * 0.92f, height * 0.38f)
+        )
+        overlayView.statusText = "Vision Engine Active - Waiting for Game Table..."
+        overlayView.invalidate()
 
         val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, data)
@@ -73,35 +97,53 @@ class AimAssistService : Service() {
         )
 
         imageReader?.setOnImageAvailableListener({ reader ->
+            if (isProcessing) {
+                val img = reader.acquireLatestImage()
+                img?.close()
+                return@setOnImageAvailableListener
+            }
+
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            val planes = image.planes
-            val buffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val cleanWidth = image.width + (rowStride - pixelStride * image.width) / pixelStride
+            isProcessing = true
 
-            val bitmap = Bitmap.createBitmap(cleanWidth, image.height, Bitmap.Config.ARGB_8888)
-            bitmap.copyPixelsFromBuffer(buffer)
-            image.close()
+            try {
+                val planes = image.planes
+                val buffer = planes[0].buffer
+                val pixelStride = planes[0].pixelStride
+                val rowStride = planes[0].rowStride
+                val cleanWidth = image.width + (rowStride - pixelStride * image.width) / pixelStride
 
-            val (balls, cueBall) = visionProcessor.processFrame(bitmap)
+                val bitmap = Bitmap.createBitmap(cleanWidth, image.height, Bitmap.Config.ARGB_8888)
+                bitmap.copyPixelsFromBuffer(buffer)
+                image.close()
 
-            if (cueBall != null && balls.isNotEmpty()) {
-                val target = balls.firstOrNull { !it.isCueBall }
-                if (target != null) {
-                    val aimDir = (target.pos - cueBall.pos).normalize()
-                    val trajectory = physicsEngine.computeShot(
-                        cueBall.pos,
-                        aimDir,
-                        balls,
-                        Pair(tableTL, tableBR)
-                    )
+                val (balls, cueBall) = visionProcessor.processFrame(bitmap)
 
-                    overlayView.post {
-                        overlayView.activeTrajectory = trajectory
-                        overlayView.invalidate()
+                mainHandler.post {
+                    if (balls.isNotEmpty()) {
+                        overlayView.statusText = "Detected ${balls.size} Balls"
+                        
+                        val activeCue = cueBall ?: balls.first()
+                        val target = balls.firstOrNull { it != activeCue }
+
+                        if (target != null) {
+                            val aimDir = (target.pos - activeCue.pos).normalize()
+                            val trajectory = physicsEngine.computeShot(
+                                activeCue.pos,
+                                aimDir,
+                                balls,
+                                Pair(tableTL, tableBR)
+                            )
+                            overlayView.activeTrajectory = trajectory
+                        }
+                    } else {
+                        overlayView.statusText = "Searching for Table Balls..."
                     }
+                    overlayView.invalidate()
+                    isProcessing = false
                 }
+            } catch (e: Exception) {
+                isProcessing = false
             }
         }, null)
 
