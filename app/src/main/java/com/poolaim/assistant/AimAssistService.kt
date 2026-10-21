@@ -33,7 +33,7 @@ class AimAssistService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isProcessing = false
 
-    private lateinit var tableBounds: Pair<Vec2, Vec2>
+    private var tableBounds: Pair<Vec2, Vec2> = Pair(Vec2(0f, 0f), Vec2(1000f, 1000f))
     private var cachedBalls: List<Ball> = emptyList()
     private var cachedCue: Ball? = null
 
@@ -51,6 +51,7 @@ class AimAssistService : Service() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
@@ -81,8 +82,8 @@ class AimAssistService : Service() {
         physicsEngine = PhysicsEngine(ballRadius = dynamicBallRadius)
         visionProcessor = VisionProcessor(tableTL, tableBR, dynamicBallRadius)
 
-        // Handle touch steering to adjust aim direction
-        overlayView.onAimAdjusted = { angle ->
+        // Aim angle callback
+        overlayView.onAimAdjusted = { angle: Float ->
             val cue = cachedCue ?: cachedBalls.firstOrNull()
             if (cue != null) {
                 val aimDir = Vec2(cos(angle), sin(angle))
@@ -131,12 +132,12 @@ class AimAssistService : Service() {
                         overlayView.detectedBalls = balls
                         overlayView.currentCuePos = cachedCue?.pos
 
-                        overlayView.statusText = "Locked: ${balls.size} Balls (Touch cue ring to steer)"
+                        overlayView.statusText = "Locked: ${balls.size} Balls Detected"
 
                         val activeCue = cachedCue!!
                         val candidates = balls.filter { it != activeCue }
 
-                        if (candidates.isNotEmpty() && overlayView.activeTrajectory == null) {
+                        if (candidates.isNotEmpty()) {
                             val target = candidates.minByOrNull { (it.pos - activeCue.pos).length() }
                             if (target != null) {
                                 val aimDir = (target.pos - activeCue.pos).normalize()
