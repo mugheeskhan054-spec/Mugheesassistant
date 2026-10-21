@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import org.opencv.android.Utils
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
+import kotlin.math.abs
 
 class VisionProcessor(
     private val tableTopLeft: Vec2,
@@ -20,102 +21,75 @@ class VisionProcessor(
         val roiY = tableTopLeft.y.toInt().coerceIn(0, mat.rows() - roiHeight)
 
         val tableMat = Mat(mat, Rect(roiX, roiY, roiWidth, roiHeight))
-        val hsv = Mat()
-        Imgproc.cvtColor(tableMat, hsv, Imgproc.COLOR_RGBA2RGB)
-        Imgproc.cvtColor(hsv, hsv, Imgproc.COLOR_RGB2HSV)
+        val gray = Mat()
+        Imgproc.cvtColor(tableMat, gray, Imgproc.COLOR_RGBA2GRAY)
 
-        // 1. AUTO-SAMPLE TABLE CLOTH COLOR
-        // Sample a 20x20 patch near the center of the table felt
-        val sampleX = (roiWidth * 0.45f).toInt().coerceIn(0, roiWidth - 25)
-        val sampleY = (roiHeight * 0.45f).toInt().coerceIn(0, roiHeight - 25)
-        val sampleRoi = Mat(hsv, Rect(sampleX, sampleY, 20, 20))
-        val meanColor = Core.mean(sampleRoi)
-        sampleRoi.release()
+        // Enhance contrast to separate spheres from the cloth gradient
+        Imgproc.equalizeHist(gray, gray)
+        Imgproc.GaussianBlur(gray, gray, Size(7.0, 7.0), 1.5)
 
-        val feltH = meanColor.`val`[0]
-        val feltS = meanColor.`val`[1]
-        val feltV = meanColor.`val`[2]
+        // Hough circles tuned to the exact scaled ball diameter
+        val circles = Mat()
+        val minR = (ballRadiusPixels * 0.75f).toInt().coerceAtLeast(10)
+        val maxR = (ballRadiusPixels * 1.25f).toInt().coerceAtLeast(minR + 4)
 
-        // 2. DYNAMIC TOLERANCE MASK BASED ON SAMPLED COLOR
-        val lowerBound = Scalar(
-            (feltH - 18.0).coerceAtLeast(0.0),
-            (feltS - 50.0).coerceAtLeast(30.0),
-            (feltV - 60.0).coerceAtLeast(30.0)
+        Imgproc.HoughCircles(
+            gray,
+            circles,
+            Imgproc.HOUGH_GRADIENT,
+            1.2,
+            ballRadiusPixels.toDouble() * 1.6, // Minimum distance between two balls
+            60.0, // Upper edge threshold
+            18.0, // Accumulator threshold (lower = more sensitive detection)
+            minR,
+            maxR
         )
-        val upperBound = Scalar(
-            (feltH + 18.0).coerceAtMost(180.0),
-            (feltS + 50.0).coerceAtMost(255.0),
-            (feltV + 60.0).coerceAtMost(255.0)
-        )
-
-        val feltMask = Mat()
-        Core.inRange(hsv, lowerBound, upperBound, feltMask)
-
-        // Invert: non-cloth objects (balls, chalk, pocket outlines) become white
-        val nonFelt = Mat()
-        Core.bitwise_not(feltMask, nonFelt)
-
-        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
-        Imgproc.morphologyEx(nonFelt, nonFelt, Imgproc.MORPH_OPEN, kernel)
-
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        Imgproc.findContours(nonFelt, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
         val balls = mutableListOf<Ball>()
         var cueBall: Ball? = null
 
-        val expectedArea = Math.PI * ballRadiusPixels * ballRadiusPixels
-        val minArea = expectedArea * 0.35
-        val maxArea = expectedArea * 2.0
-        val pocketRadiusTolerance = ballRadiusPixels * 2.2f
+        val hsv = Mat()
+        Imgproc.cvtColor(tableMat, hsv, Imgproc.COLOR_RGBA2RGB)
+        Imgproc.cvtColor(hsv, hsv, Imgproc.COLOR_RGB2HSV)
 
-        for (contour in contours) {
-            val area = Imgproc.contourArea(contour)
-            if (area in minArea..maxArea) {
-                val moments = Imgproc.moments(contour)
-                if (moments.m00 != 0.0) {
-                    val localX = (moments.m10 / moments.m00).toFloat()
-                    val localY = (moments.m01 / moments.m00).toFloat()
+        val pocketRadiusTolerance = ballRadiusPixels * 2.5f
 
-                    // Exclude pocket zones
-                    val isNearCorner = (localX < pocketRadiusTolerance || localX > roiWidth - pocketRadiusTolerance) &&
-                            (localY < pocketRadiusTolerance || localY > roiHeight - pocketRadiusTolerance)
-                    val isNearSidePocket = (Math.abs(localX - (roiWidth / 2f)) < pocketRadiusTolerance) &&
-                            (localY < pocketRadiusTolerance || localY > roiHeight - pocketRadiusTolerance)
+        for (i in 0 until circles.cols()) {
+            val data = circles.get(0, i) ?: continue
+            val localX = data[0].toFloat()
+            val localY = data[1].toFloat()
+            val r = data[2].toFloat()
 
-                    if (isNearCorner || isNearSidePocket) {
-                        contour.release()
-                        continue
-                    }
+            // Filter out edge pockets
+            val isNearCorner = (localX < pocketRadiusTolerance || localX > roiWidth - pocketRadiusTolerance) &&
+                    (localY < pocketRadiusTolerance || localY > roiHeight - pocketRadiusTolerance)
+            val isNearSidePocket = (abs(localX - (roiWidth / 2f)) < pocketRadiusTolerance) &&
+                    (localY < pocketRadiusTolerance || localY > roiHeight - pocketRadiusTolerance)
 
-                    val screenX = localX + roiX
-                    val screenY = localY + roiY
+            if (isNearCorner || isNearSidePocket) continue
 
-                    val pX = localX.toInt().coerceIn(0, tableMat.cols() - 1)
-                    val pY = localY.toInt().coerceIn(0, tableMat.rows() - 1)
-                    val pixel = hsv.get(pY, pX)
+            val screenX = localX + roiX
+            val screenY = localY + roiY
 
-                    // White cue ball detection remains universal (always white regardless of table color)
-                    val isWhite = (pixel != null && pixel[1] < 45.0 && pixel[2] > 190.0)
-                    val detectedBall = Ball(Vec2(screenX, screenY), ballRadiusPixels, isWhite)
+            // Sample central pixels to locate the white cue ball
+            val pX = localX.toInt().coerceIn(0, tableMat.cols() - 1)
+            val pY = localY.toInt().coerceIn(0, tableMat.rows() - 1)
+            val pixel = hsv.get(pY, pX)
 
-                    if (isWhite) {
-                        cueBall = detectedBall
-                    }
-                    balls.add(detectedBall)
-                }
+            val isWhite = (pixel != null && pixel[1] < 45.0 && pixel[2] > 185.0)
+            val detected = Ball(Vec2(screenX, screenY), r, isWhite)
+
+            if (isWhite) {
+                cueBall = detected
             }
-            contour.release()
+            balls.add(detected)
         }
 
         mat.release()
         tableMat.release()
+        gray.release()
+        circles.release()
         hsv.release()
-        feltMask.release()
-        nonFelt.release()
-        hierarchy.release()
-        kernel.release()
 
         return Pair(balls, cueBall)
     }
